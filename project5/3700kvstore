@@ -21,19 +21,31 @@ class Server:
 	voted = False
 	# number of votes we received
 	election_votes = 1
+	# as leader, last time we sent an rpc time
+	last_sent_rpc = time.time()
+	# timeout length as leader
+	rpc_timeout_length = 100
 
 	#enter election period
 	def election(self):
-		self.election_start_time = time.time()
 		self.state = 'candidate'
 		msg = {'src': self.id, 'dst': 'FFFF', 'type': 'requestvote_rpc'}
 		sock.send(json.dumps(msg))
+		self.election_start_time = time.time()
 
 	# enter election if we have hit our timeout
 	def check_for_timeout(self):
 		clock = time.time()
 		if (clock - self.last_received_rpc) * 1000 > self.timeout_length:
 			self.election()			
+
+	# resend rpc if we hit our timeout
+	def check_for_rpc_timeout(self):
+		clock = time.time()
+		if (clock - self.last_sent_rpc) * 1000 > self.rpc_timeout_length:
+			msg = {'src': self.id, 'dst': 'FFFF', 'type': 'leader_rpc', 'term': self.term}
+			self.send(json.dumps(msg))
+		self.last_sent_rpc = time.time()
 
 	def receive(self):
 		# Connect to the network. All messages to/from other replicas and clients will
@@ -48,6 +60,8 @@ class Server:
 				self.check_for_timeout()
 			if self.state == 'candidate':
 				self.check_for_timeout()
+			if self.state == 'leader':
+				self.check_for_rpc_timeout()
 			ready = select.select([sock], [], [], 0.1)[0]
 	
 			if sock in ready:
@@ -78,6 +92,12 @@ class Server:
 					# set term to leader's term if ours is lower
 					if self.term < msg['term']:
 						self.term = msg['term']
+						# revert to follower if we are leader and we receive leader rpc with term lower than ours
+						if self.state == 'leader'
+							self.state == 'follower'
+					# revert to follower if we are candidate and we receive a leader rpc (leader comes back up)
+					if self.state == 'candidate':
+						self.state = 'follower'
 				# received a request for a vote rpc
 				elif msg['type'] == 'requestvote_rpc':
 					# make sure we dont vote twice and we arent a candidate ourself
