@@ -39,12 +39,12 @@ class Server:
 		# Connect to the network. All messages to/from other replicas and clients will
 		# occur over this socket
 		sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-		sock.connect(my_id)
+		sock.connect(self.id)
 
 		last = 0
 
 		while True:
-			if leader_id:
+			if self.leader_id:
 				self.check_for_timeout()
 			if self.state == 'candidate':
 				self.check_for_timeout()
@@ -61,9 +61,12 @@ class Server:
 					# if I am follower, want to redirect message
 					if self.state == 'follower':		
 						# check to make sure we know who the leader is
-						if leader_id:
-							msg = {'src': self.id, 'dst': msg['src'], 'leader': leader_id, 'type': 'redirect', 'MID': msg['MID']}
+						if self.leader_id:
+							msg = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'type': 'redirect', 'MID': msg['MID']}
 							sock.send(json.dumps(msg))
+						else:
+							msg = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'redirect', 'MID': msg['MID']}
+                                                        sock.send(json.dumps(msg))
 		
 				# Handle noop messages. This may be removed from your final implementation
 				elif msg['type'] == 'leader_rpc':
@@ -90,3 +93,7 @@ class Server:
 						self.state = 'leader'
 						self.election_votes = 1
 						self.term += 1
+
+if __name__ == '__main__':
+	server = Server()
+	server.receive()
