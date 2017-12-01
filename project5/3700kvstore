@@ -23,7 +23,15 @@ class Server:
 	last_sent_rpc = time.time()
 	# timeout length as leader
 	rpc_timeout_length = 100
+	# our transaction log mapping key to input msg
 	transaction_log = {}
+	# our key value store of committed transactions
+	kv_store = {}	
+	# dict mapping key to number of acknowledged commit
+	transaction_votes = {}
+	# dict mapping key to last sent time
+	transaction_timeout = {}
+
 	sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         sock.connect(id)
 	
@@ -46,9 +54,19 @@ class Server:
 	def check_for_rpc_timeout(self):
 		clock = time.time()
 		if (clock - self.last_sent_rpc) * 1000 > self.rpc_timeout_length:
-			msg = {'src': self.id, 'dst': 'FFFF', 'leader': self.id, 'type': 'leader_rpc', 'term': self.term}
+			msg = {'src': self.id, 'dst': 'FFFF', 'leader': self.id, 'type': 'leader_rpc', 'term': self.term, 'blank': True}
 			self.send_rpc(msg)
 		self.last_sent_rpc = time.time()
+
+	# resend appenentries_rpc if any transaction has timed out
+	def check_for_transaction_timeout(self):
+		clock = time.time()
+		for k in self.transaction_timeout.keys():
+			# resend appendentries rpc if we hit timeout. Reset time in our transaction_timeout dict
+			if (clock - self.last_sent_rpc) * 1000 > self.rpc_timeout_length:
+				msg = {'src': self.id, 'dst': 'FFFF', 'leader': self.leader_id, 'term': self.term, 'type': 'leader_rpc', 'key': self.transaction_log[k]['key'], 'value': self.transaction_log[k]['value'], 'blank': False, 'commit': False}
+				self.send_rpc(msg)
+				self.transaction_timeout[k] = time.time()
 
 	# send rpc to all of our replicas
 	def send_rpc(self, msg):
@@ -60,6 +78,7 @@ class Server:
 		while True:
 			if self.state == 'leader':
 				self.check_for_rpc_timeout()
+				self.check_for_transaction_timeout()
 			else:
 				self.check_for_timeout()
 			ready = select.select([self.sock], [], [], 0.1)[0]
@@ -85,19 +104,22 @@ class Server:
 					elif self.state == 'leader':
 						# If msg is a get, return value to client
 						if msg['type'] == 'get':
-							# if requested key is in our transaction log, return the value
-							if msg['key'] in self.transaction_log.keys():
-								msg = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'type': 'ok', 'MID': msg['MID'], 'value': self.transaction_log[msg['key']]}
+							# if requested key is in our key value store, return the value
+							if msg['key'] in self.kv_store.keys():
+								msg = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'type': 'ok', 'MID': msg['MID'], 'value': self.kv_store[msg['key']]}
 								self.sock.send(json.dumps(msg))
-							# send blank message if key ws never put in our transaction log
+							# send blank message if key ws never put in our key value store
 							else:
 								msg = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'type': 'ok', 'MID': msg['MID'], 'value': ''}
                                                                 self.sock.send(json.dumps(msg))
-						# if msg is a put, enter entry into our dict
+						# if msg is a put, enter entry into our transaction log and send rpc appendentries to replicas
 						elif msg['type'] == 'put':
-							self.transaction_log[msg['key']] = msg['value']	
-							msg = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'type': 'ok', 'MID': msg['MID']}
-							self.sock.send(json.dumps(msg))
+							self.transaction_log[msg['key']] = msg
+							self.transaction_votes[msg['key']] = 1
+							self.transaction_timeout[msg['key']] = time.time()
+							msg = {'src': self.id, 'dst': 'FFFF', 'leader': self.leader_id, 'term': self.term, 'type': 'leader_rpc', 'key': msg['key'], 'value': msg['value'], 'blank': False, 'commit': False}
+							self.send_rpc(msg)
+
 				# Handle noop messages. This may be removed from your final implementation
 				elif msg['type'] == 'leader_rpc':
 					# reset our last received rpc time
@@ -115,6 +137,19 @@ class Server:
 					# make sure leader rpc we receive is at least our term
 					if self.state == 'candidate' and msg['term'] >= self.term:
 						self.state = 'follower'
+					# if we receive appendentries rpc, add to our transaction log and send confirmation to leader
+					if not msg['blank']:
+						# commit message to our key value store
+						if msg['commit']:
+							self.kv_store[msg['key']] = msg['value']
+							
+						# send ack to leader
+						else:
+							# NOTE: message being mapped is the leader_rpc message, does not have MID
+							self.transaction_log[msg['key']] = msg
+							msg = {'src': self.id, 'dst': self.leader_id, 'leader': self.leader_id, 'type': 'ack_rpc', 'key': msg['key'], 'value': msg['value']}
+							self.sock.send(json.dumps(msg))
+
 				# received a request for a vote rpc
 				elif msg['type'] == 'requestvote_rpc':
 					# make sure we dont vote twice and we arent a candidate ourself
@@ -129,9 +164,29 @@ class Server:
 					self.election_votes += 1
 					# become leader if we receive majority of votes
 					if self.election_votes >= len(self.replica_ids) // 2 + 1:
+						print "{0} became leader".format(self.id)
 						self.state = 'leader'
 						self.leader_id = self.id
 						self.election_votes = 1
+
+				# leader received ack for transaction
+				elif msg['type'] == 'ack_rpc':
+					if msg['key'] in self.transaction_votes.keys():
+						# increment number of votes for this key
+						self.transaction_votes[msg['key']] += 1
+						# check to see if we reached quorum
+						if self.transaction_votes[msg['key']] >= len(self.replica_ids) // 2 + 1:
+							# delete entry from our timeout and votes dicts
+							del self.transaction_timeout[msg['key']]
+							del self.transaction_votes[msg['key']]
+							# commit our transaction
+							self.kv_store[msg['key']] = msg['value']
+							# tell replicas to commit transaction
+							msg = {'src': self.id, 'dst': 'FFFF', 'leader': self.leader_id, 'term': self.term,  'type': 'leader_rpc', 'key': msg['key'], 'value': msg['value'], 'blank': False, 'commit': True}
+							self.send_rpc(msg)
+							# send ok to client
+							client_msg = {'src': self.id, 'dst': self.transaction_log[msg['key']]['src'], 'leader': self.leader_id, 'type': 'ok', 'MID': self.transaction_log[msg['key']]['MID']}
+							self.sock.send(json.dumps(client_msg))
 
 if __name__ == '__main__':
 	server = Server()
