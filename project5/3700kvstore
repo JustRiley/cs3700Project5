@@ -15,8 +15,6 @@ class Server:
 	last_received_rpc = time.time()
 	# timeout length for this server (between 150 and 300 ms)
 	timeout_length = randint(150, 300)
-	# the time when we started our election
-	election_start_time = time.time()
 	# flag to check if we voted already
 	voted = False
 	# number of votes we received
@@ -28,20 +26,19 @@ class Server:
 	transaction_log = {}
 	sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         sock.connect(id)
-
+	
 	#enter election period
 	def election(self):
-		print "{0} entered election as candidate".format(self.id)
+		self.term += 1
 		self.state = 'candidate'
-		msg = {'src': self.id, 'dst': 'FFFF', 'type': 'requestvote_rpc'}
-		self.sock.send(json.dumps(msg))
-		self.election_start_time = time.time()
+		msg = {'src': self.id, 'dst': 'FFFF', 'leader': 'FFFF', 'type': 'requestvote_rpc'}
+		self.send_rpc(msg)
+		self.last_received_rpc = time.time()
 
 	# enter election if we have hit our timeout
 	def check_for_timeout(self):
 		clock = time.time()
 		time_diff = (clock - self.last_received_rpc) * 1000
-		print str(time_diff)
 		if time_diff > self.timeout_length:
 			self.election()			
 
@@ -49,18 +46,22 @@ class Server:
 	def check_for_rpc_timeout(self):
 		clock = time.time()
 		if (clock - self.last_sent_rpc) * 1000 > self.rpc_timeout_length:
-			msg = {'src': self.id, 'dst': 'FFFF', 'type': 'leader_rpc', 'term': self.term}
-			self.sock.send(json.dumps(msg))
+			msg = {'src': self.id, 'dst': 'FFFF', 'leader': self.id, 'type': 'leader_rpc', 'term': self.term}
+			self.send_rpc(msg)
 		self.last_sent_rpc = time.time()
+
+	# send rpc to all of our replicas
+	def send_rpc(self, msg):
+		for id in self.replica_ids:
+			msg['dst'] = id
+			self.sock.send(json.dumps(msg))
 
 	def receive(self):
 		while True:
-			#if self.leader_id:
-			#	self.check_for_timeout()
-			#if self.state == 'candidate':
-			self.check_for_timeout()
 			if self.state == 'leader':
 				self.check_for_rpc_timeout()
+			else:
+				self.check_for_timeout()
 			ready = select.select([self.sock], [], [], 0.1)[0]
 	
 			if self.sock in ready:
@@ -85,8 +86,8 @@ class Server:
 						# If msg is a get, return value to client
 						if msg['type'] == 'get':
 							# if requested key is in our transaction log, return the value
-							if msg['key'] in transaction_log.keys():
-								msg = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'type': 'ok', 'MID': msg['MID'], 'value': transaction_log[msg['key']]}
+							if msg['key'] in self.transaction_log.keys():
+								msg = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'type': 'ok', 'MID': msg['MID'], 'value': self.transaction_log[msg['key']]}
 								self.sock.send(json.dumps(msg))
 							# send blank message if key ws never put in our transaction log
 							else:
@@ -94,14 +95,15 @@ class Server:
                                                                 self.sock.send(json.dumps(msg))
 						# if msg is a put, enter entry into our dict
 						elif msg['type'] == 'put':
-							transaction_log[msg['key']] = msg['value']	
+							self.transaction_log[msg['key']] = msg['value']	
+							msg = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'type': 'ok', 'MID': msg['MID']}
+							self.sock.send(json.dumps(msg))
 				# Handle noop messages. This may be removed from your final implementation
 				elif msg['type'] == 'leader_rpc':
 					# reset our last received rpc time
 					self.last_received_rpc = time.time()
 					if self.leader_id != msg['src']:
 						self.leader_id = msg['src']
-						print "changed out leader_id to {0}".format(self.leader_id)
 						self.voted = False
 					# set term to leader's term if ours is lower
 					if self.term < msg['term']:
@@ -110,26 +112,26 @@ class Server:
 						if self.state == 'leader':
 							self.state == 'follower'
 					# revert to follower if we are candidate and we receive a leader rpc (leader comes back up)
-					if self.state == 'candidate':
+					# make sure leader rpc we receive is at least our term
+					if self.state == 'candidate' and msg['term'] >= self.term:
 						self.state = 'follower'
 				# received a request for a vote rpc
 				elif msg['type'] == 'requestvote_rpc':
-					print "{0} received a vote request".format(self.id)
 					# make sure we dont vote twice and we arent a candidate ourself
 					if not self.voted and self.state != 'candidate':
-						msg = {'src': self.id, 'dst': msg['src'], 'type': 'vote_rpc'}
+						msg = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'vote_rpc'}
 						self.sock.send(json.dumps(msg))
+						# reset our last received rpc time
+						self.last_received_rpc = time.time()
 						self.voted = True
 				# received a vote rpc
 				elif msg['type'] == 'vote_rpc':
-					print "{0} received a vote".format(self.id)
 					self.election_votes += 1
 					# become leader if we receive majority of votes
-					if self.election_votes >= replica_ids.size() // 2 + 1:
+					if self.election_votes >= len(self.replica_ids) // 2 + 1:
 						self.state = 'leader'
 						self.leader_id = self.id
 						self.election_votes = 1
-						self.term += 1
 
 if __name__ == '__main__':
 	server = Server()
