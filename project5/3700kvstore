@@ -37,6 +37,7 @@ class Server:
 	
 	#enter election period
 	def election(self):
+		print "{0} becomes a candidate".format(self.id)
 		self.term += 1
 		self.state = 'candidate'
 		msg = {'src': self.id, 'dst': 'FFFF', 'leader': 'FFFF', 'type': 'requestvote_rpc'}
@@ -125,7 +126,11 @@ class Server:
 					# reset our last received rpc time
 					self.last_received_rpc = time.time()
 					if self.leader_id != msg['src']:
+						# if we are leader and our received term is equal or greater than ours, set back to follower
+						if self.state == 'leader' and self.term <= msg['term']:
+							self.state = 'follower'
 						self.leader_id = msg['src']
+						print "{0} set leader_id to {1}".format(self.id, self.leader_id)
 						self.voted = False
 					# set term to leader's term if ours is lower
 					if self.term < msg['term']:
@@ -133,6 +138,7 @@ class Server:
 						# revert to follower if we are leader and we receive leader rpc with term lower than ours
 						if self.state == 'leader':
 							self.state == 'follower'
+							self.election_votes = 1
 					# revert to follower if we are candidate and we receive a leader rpc (leader comes back up)
 					# make sure leader rpc we receive is at least our term
 					if self.state == 'candidate' and msg['term'] >= self.term:
@@ -152,15 +158,17 @@ class Server:
 
 				# received a request for a vote rpc
 				elif msg['type'] == 'requestvote_rpc':
-					# make sure we dont vote twice and we arent a candidate ourself
-					if not self.voted and self.state != 'candidate':
+					print "{0} received a vote request".format(self.id)
+					# make sure we dont vote twice and we are a follower
+					if not self.voted and self.state == 'follower':
 						msg = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'vote_rpc'}
 						self.sock.send(json.dumps(msg))
 						# reset our last received rpc time
 						self.last_received_rpc = time.time()
 						self.voted = True
 				# received a vote rpc
-				elif msg['type'] == 'vote_rpc':
+				elif msg['type'] == 'vote_rpc' and self.state == 'candidate':
+					print "{0} received a vote".format(self.id)
 					self.election_votes += 1
 					# become leader if we receive majority of votes
 					if self.election_votes >= len(self.replica_ids) // 2 + 1:
