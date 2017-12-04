@@ -15,8 +15,8 @@ class Server:
 	last_received_rpc = time.time()
 	# timeout length for this server (between 150 and 300 ms)
 	timeout_length = randint(150, 300)
-	# flag to check if we voted already
-	voted = False
+	# who we voted for, map of term to who we voted for
+	voted_for = {}
 	# number of votes we received
 	election_votes = 1
 	# as leader, last time we sent an rpc time
@@ -41,10 +41,11 @@ class Server:
 	
 	#enter election period
 	def election(self):
-		#print "{0} becomes a candidate".format(self.id)
+		print "{0} becomes a candidate".format(self.id)
 		self.term += 1
 		self.state = 'candidate'
-		msg = {'src': self.id, 'dst': 'FFFF', 'commit_term': self.commit_term, 'log_index': len(self.kv_store.keys()), 'leader': 'FFFF', 'type': 'requestvote_rpc'}
+		self.election_votes = 1
+		msg = {'src': self.id, 'dst': 'FFFF', 'term': self.term, 'commit_term': self.commit_term, 'log_index': len(self.kv_store.keys()), 'leader': 'FFFF', 'type': 'requestvote_rpc'}
 		self.send_rpc(msg)
 		self.last_received_rpc = time.time()
 
@@ -132,28 +133,27 @@ class Server:
 				elif msg['type'] == 'leader_rpc':
 					# reset our last received rpc time
 					self.last_received_rpc = time.time()
-					if self.leader_id != msg['src'] and self.term < msg['term']:
-						# if we are leader and our received term is equal or greater than ours, set back to follower
-						if self.state == 'leader' and self.term <= msg['term']:
-							#print "{0} reverted back to follower from leader".format(self.id)
-							self.state = 'follower'
-						self.leader_id = msg['src']
-						#print "{0} set leader_id to {1}".format(self.id, self.leader_id)
-						self.voted = False
-					# set term to leader's term if ours is lower
-					if self.term < msg['term']:
-						self.term = msg['term']
-						# revert to follower if we are leader and we receive leader rpc with term lower than ours
-						if self.state == 'leader':
-							self.state == 'follower'
-							self.election_votes = 1
 					# revert to follower if we are candidate and we receive a leader rpc (leader comes back up)
-					# make sure leader rpc we receive is at least our term
-					if self.state == 'candidate' and msg['term'] >= self.term:
+                                        # make sure leader rpc we receive is at least our term
+                                        if self.state == 'candidate' and msg['term'] >= self.term:
+                                                print "{0} candidate reverted to follower".format(self.id)
+                                                self.state = 'follower'
+                                                self.election_votes = 1
+						self.leader_id = msg['leader']
+						self.term = msg['term']
+					elif self.state == 'follower' and self.leader_id != msg['leader'] and self.term <= msg['term']:
+						self.leader_id = msg['leader']
+						self.term = msg['term']
+						print "{0} set leader_id to {1}".format(self.id, self.leader_id)
+					# set term to leader's term if ours is lower
+					elif self.state == 'leader' and self.term < msg['term']:
+						self.term = msg['term']
+						print "{0} reverted back to follower from leader".format(self.id)
 						self.state = 'follower'
 						self.election_votes = 1
+						self.leader_id = msg['leader']
 					# if we receive appendentries rpc, add to our transaction log and send confirmation to leader
-					if not msg['blank']:
+					if self.state == 'follower' and not msg['blank']:
 						# commit message to our key value store
 						if msg['commit']:
 							self.commit_term = msg['term']
@@ -168,26 +168,26 @@ class Server:
 							self.sock.send(json.dumps(msg))
 
 				# received a request for a vote rpc
-				elif msg['type'] == 'requestvote_rpc':
-					#print "{0} received a vote request".format(self.id)
-					# make sure we dont vote twice and we are a follower
-					if not self.voted and self.state == 'follower':
+				elif msg['type'] == 'requestvote_rpc' and self.state == 'follower':
+					print "{0} received a vote request".format(self.id)
+					# make sure we are a follower and we haven't yet voted in this term
+					if msg['term'] not in self.voted_for.keys():
 						# if our commit term is lower, then vote
 						if self.commit_term < msg['commit_term']:
-							#print "{0} voted for {1}".format(self.id, msg['src'])
-							msg = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'vote_rpc'}
-							self.sock.send(json.dumps(msg))
+							print "{0} voted for {1}".format(self.id, msg['src'])
+							response = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'vote_rpc'}
+							self.sock.send(json.dumps(response))
 							# reset our last received rpc time
 							self.last_received_rpc = time.time()
-							self.voted = True
+							self.voted_for[msg['term']]  = msg['src']
 						# if commit terms same, compare log index
 						elif self.commit_term == msg['commit_term'] and len(self.kv_store.keys()) <= msg['log_index']:
-							#print "{0} voted for {1}".format(self.id, msg['src'])
-							msg = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'vote_rpc'}
-                                                        self.sock.send(json.dumps(msg))
+							print "{0} voted for {1}".format(self.id, msg['src'])
+							response = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'vote_rpc'}
+                                                        self.sock.send(json.dumps(response))
                                                         # reset our last received rpc time
                                                         self.last_received_rpc = time.time()
-                                                        self.voted = True
+                                                        self.voted_for[msg['term']] = msg['src']
 							
 				# received a vote rpc
 				elif msg['type'] == 'vote_rpc' and self.state == 'candidate':
@@ -195,7 +195,7 @@ class Server:
 					self.election_votes += 1
 					# become leader if we receive majority of votes
 					if self.election_votes >= len(self.replica_ids) // 2 + 1:
-						#print "{0} became leader".format(self.id)
+						print "{0} became leader".format(self.id)
 						self.state = 'leader'
 						self.leader_id = self.id
 						self.election_votes = 1
