@@ -1,42 +1,227 @@
 #!/usr/bin/env python
 
 import sys, socket, select, time, json, random
+from random import randint
+from collections import OrderedDict
 
-# Your ID number
-my_id = sys.argv[1]
-
-# The ID numbers of all the other replicas
-replica_ids = sys.argv[2:]
-
-# Connect to the network. All messages to/from other replicas and clients will
-# occur over this socket
-sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-sock.connect(my_id)
-
-last = 0
-
-while True:
-	ready = select.select([sock], [], [], 0.1)[0]
+class Server:
+	term = 1
+	state = 'follower'
+	# Your ID number
+	id = sys.argv[1]
+	# The ID numbers of all the other replicas
+	replica_ids = sys.argv[2:]
+	leader_id = None
+	last_received_rpc = time.time()
+	# timeout length for this server (between 150 and 300 ms)
+	timeout_length = randint(150, 300)
+	# flag to check if we voted already
+	voted = False
+	# number of votes we received
+	election_votes = 1
+	# as leader, last time we sent an rpc time
+	last_sent_rpc = time.time()
+	# timeout length as leader
+	rpc_timeout_length = 100
+	# our transaction log mapping key to input msg
+	transaction_log = OrderedDict()
+	# our key value store of committed transactions
+	kv_store = OrderedDict()
+	# dict mapping key to number of acknowledged commit
+	transaction_votes = {}
+	# dict mapping key to last sent time
+	transaction_timeout = {}
+	# dict mapping key to term that it was added
+	transaction_term = {}
+	# the term of our latest commit
+	commit_term = 1
 	
-	if sock in ready:
-		msg_raw = sock.recv(32768)
+	sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        sock.connect(id)
+	
+	#enter election period
+	def election(self):
+		#print "{0} becomes a candidate".format(self.id)
+		self.term += 1
+		self.state = 'candidate'
+		msg = {'src': self.id, 'dst': 'FFFF', 'commit_term': self.commit_term, 'log_index': len(self.kv_store.keys()), 'leader': 'FFFF', 'type': 'requestvote_rpc'}
+		self.send_rpc(msg)
+		self.last_received_rpc = time.time()
+
+	# enter election if we have hit our timeout
+	def check_for_timeout(self):
+		clock = time.time()
+		time_diff = (clock - self.last_received_rpc) * 1000
+		if time_diff > self.timeout_length:
+			self.election()			
+
+	# resend rpc if we hit our timeout
+	def check_for_rpc_timeout(self):
+		clock = time.time()
+		if (clock - self.last_sent_rpc) * 1000 > self.rpc_timeout_length:
+			msg = {'src': self.id, 'dst': 'FFFF', 'leader': self.id, 'type': 'leader_rpc', 'term': self.term, 'blank': True}
+			self.send_rpc(msg)
+			self.last_sent_rpc = time.time()
+
+	# resend appenentries_rpc if any transaction has timed out
+	def check_for_transaction_timeout(self):
+		clock = time.time()
+		for k in self.transaction_timeout.keys():
+			# resend appendentries rpc if we hit timeout. Reset time in our transaction_timeout dict
+			if (clock - self.transaction_timeout[k]) * 1000 > self.rpc_timeout_length:
+				#print "resent transaction msg"
+				msg = {'src': self.id, 'dst': 'FFFF', 'leader': self.leader_id, 'term': self.term, 'type': 'leader_rpc', 'key': self.transaction_log[k]['key'], 'value': self.transaction_log[k]['value'], 'blank': False, 'commit': False}
+				self.send_rpc(msg)
+				self.transaction_timeout[k] = time.time()
+
+	# send rpc to all of our replicas
+	def send_rpc(self, msg):
+		# reset our last sent rpc time
+		self.last_sent_rpc = time.time()
+		for id in self.replica_ids:
+			msg['dst'] = id
+			self.sock.send(json.dumps(msg))
+
+	def receive(self):
+		while True:
+			if self.state == 'leader':
+				self.check_for_rpc_timeout()
+				self.check_for_transaction_timeout()
+			else:
+				self.check_for_timeout()
+			ready = select.select([self.sock], [], [], 0.01)[0]
+	
+			if self.sock in ready:
+				msg_raw = self.sock.recv(32768)
 		
-		if len(msg_raw) == 0: continue
-		msg = json.loads(msg_raw)
+				if len(msg_raw) == 0: continue
+				msg = json.loads(msg_raw)
 		
-		# For now, ignore get() and put() from clients
-		if msg['type'] in ['get', 'put']:
-                        pass
-		
-		# Handle noop messages. This may be removed from your final implementation
-		elif msg['type'] == 'noop':
-			print '%s received a NOOP from %s' % (msg['dst'], msg['src'])
-		
-	clock = time.time()
-	if clock-last > 2:
-		# Send a no-op message to a random peer every two seconds, just for fun
-		# You definitely want to remove this from your implementation
-		msg = {'src': my_id, 'dst': random.choice(replica_ids), 'leader': 'FFFF', 'type': 'noop'}
-		sock.send(json.dumps(msg))
-		print '%s sending a NOOP to %s' % (msg['src'], msg['dst'])
-		last = clock
+				# If we receive get or put, make sure the dst is our id
+				if msg['type'] in ['get', 'put'] and msg['dst'] == self.id:
+					# if I am follower, want to redirect message
+					if self.state == 'follower':		
+						# check to make sure we know who the leader is
+						if self.leader_id:
+							msg = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'type': 'redirect', 'MID': msg['MID']}
+							self.sock.send(json.dumps(msg))
+						else:
+							msg = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'redirect', 'MID': msg['MID']}
+                                                        self.sock.send(json.dumps(msg))
+					# If i am a leader, commit transaction and send rpc to followers
+					elif self.state == 'leader':
+						# If msg is a get, return value to client
+						if msg['type'] == 'get':
+							# if requested key is in our key value store, return the value
+							if msg['key'] in self.kv_store.keys():
+								msg = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'type': 'ok', 'MID': msg['MID'], 'value': self.kv_store[msg['key']]}
+								self.sock.send(json.dumps(msg))
+							# send blank message if key ws never put in our key value store
+							else:
+								msg = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'type': 'ok', 'MID': msg['MID'], 'value': ''}
+                                                                self.sock.send(json.dumps(msg))
+						# if msg is a put, enter entry into our transaction log and send rpc appendentries to replicas
+						elif msg['type'] == 'put':
+							self.transaction_log[msg['key']] = msg
+							self.transaction_votes[msg['key']] = 1
+							self.transaction_timeout[msg['key']] = time.time()
+							msg = {'src': self.id, 'dst': 'FFFF', 'leader': self.leader_id, 'term': self.term, 'type': 'leader_rpc', 'key': msg['key'], 'value': msg['value'], 'blank': False, 'commit': False}
+							self.send_rpc(msg)
+
+				# Handle noop messages. This may be removed from your final implementation
+				elif msg['type'] == 'leader_rpc':
+					# reset our last received rpc time
+					self.last_received_rpc = time.time()
+					if self.leader_id != msg['src'] and self.term < msg['term']:
+						# if we are leader and our received term is equal or greater than ours, set back to follower
+						if self.state == 'leader' and self.term <= msg['term']:
+							#print "{0} reverted back to follower from leader".format(self.id)
+							self.state = 'follower'
+						self.leader_id = msg['src']
+						#print "{0} set leader_id to {1}".format(self.id, self.leader_id)
+						self.voted = False
+					# set term to leader's term if ours is lower
+					if self.term < msg['term']:
+						self.term = msg['term']
+						# revert to follower if we are leader and we receive leader rpc with term lower than ours
+						if self.state == 'leader':
+							self.state == 'follower'
+							self.election_votes = 1
+					# revert to follower if we are candidate and we receive a leader rpc (leader comes back up)
+					# make sure leader rpc we receive is at least our term
+					if self.state == 'candidate' and msg['term'] >= self.term:
+						self.state = 'follower'
+						self.election_votes = 1
+					# if we receive appendentries rpc, add to our transaction log and send confirmation to leader
+					if not msg['blank']:
+						# commit message to our key value store
+						if msg['commit']:
+							self.commit_term = msg['term']
+							self.kv_store[msg['key']] = msg['value']
+							
+						# send ack to leader
+						else:
+							# NOTE: message being mapped is the leader_rpc message, does not have MID
+							self.transaction_log[msg['key']] = msg
+							self.transaction_term[msg['key']] = msg['term']
+							msg = {'src': self.id, 'dst': self.leader_id, 'leader': self.leader_id, 'type': 'ack_rpc', 'key': msg['key'], 'value': msg['value']}
+							self.sock.send(json.dumps(msg))
+
+				# received a request for a vote rpc
+				elif msg['type'] == 'requestvote_rpc':
+					#print "{0} received a vote request".format(self.id)
+					# make sure we dont vote twice and we are a follower
+					if not self.voted and self.state == 'follower':
+						# if our commit term is lower, then vote
+						if self.commit_term < msg['commit_term']:
+							#print "{0} voted for {1}".format(self.id, msg['src'])
+							msg = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'vote_rpc'}
+							self.sock.send(json.dumps(msg))
+							# reset our last received rpc time
+							self.last_received_rpc = time.time()
+							self.voted = True
+						# if commit terms same, compare log index
+						elif self.commit_term == msg['commit_term'] and len(self.kv_store.keys()) <= msg['log_index']:
+							#print "{0} voted for {1}".format(self.id, msg['src'])
+							msg = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'vote_rpc'}
+                                                        self.sock.send(json.dumps(msg))
+                                                        # reset our last received rpc time
+                                                        self.last_received_rpc = time.time()
+                                                        self.voted = True
+							
+				# received a vote rpc
+				elif msg['type'] == 'vote_rpc' and self.state == 'candidate':
+					#print "{0} received a vote".format(self.id)
+					self.election_votes += 1
+					# become leader if we receive majority of votes
+					if self.election_votes >= len(self.replica_ids) // 2 + 1:
+						#print "{0} became leader".format(self.id)
+						self.state = 'leader'
+						self.leader_id = self.id
+						self.election_votes = 1
+						
+
+				# leader received ack for transaction
+				elif msg['type'] == 'ack_rpc':
+					if msg['key'] in self.transaction_votes.keys():
+						# increment number of votes for this key
+						self.transaction_votes[msg['key']] += 1
+						# check to see if we reached quorum
+						if self.transaction_votes[msg['key']] >= len(self.replica_ids) // 2 + 1:
+							# delete entry from our timeout and votes dicts
+							del self.transaction_timeout[msg['key']]
+							del self.transaction_votes[msg['key']]
+							# commit our transaction
+							self.kv_store[msg['key']] = msg['value']
+							# tell replicas to commit transaction
+							msg = {'src': self.id, 'dst': 'FFFF', 'leader': self.leader_id, 'term': self.term,  'type': 'leader_rpc', 'key': msg['key'], 'value': msg['value'], 'blank': False, 'commit': True}
+							self.send_rpc(msg)
+							# set latest commit term to this term
+							self.commit_term = self.term
+							# send ok to client
+							client_msg = {'src': self.id, 'dst': self.transaction_log[msg['key']]['src'], 'leader': self.leader_id, 'type': 'ok', 'MID': self.transaction_log[msg['key']]['MID']}
+							self.sock.send(json.dumps(client_msg))
+
+if __name__ == '__main__':
+	server = Server()
+	server.receive()
