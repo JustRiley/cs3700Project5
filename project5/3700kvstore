@@ -22,7 +22,7 @@ class Server:
 	# as leader, last time we sent an rpc time
 	last_sent_rpc = time.time()
 	# timeout length as leader
-	rpc_timeout_length = 75
+	rpc_timeout_length = 100
 	# our transaction log mapping key to input msg
 	transaction_log = OrderedDict()
 	# our key value store of committed transactions
@@ -61,14 +61,15 @@ class Server:
 		if (clock - self.last_sent_rpc) * 1000 > self.rpc_timeout_length:
 			msg = {'src': self.id, 'dst': 'FFFF', 'leader': self.id, 'type': 'leader_rpc', 'term': self.term, 'blank': True}
 			self.send_rpc(msg)
-		self.last_sent_rpc = time.time()
+			self.last_sent_rpc = time.time()
 
 	# resend appenentries_rpc if any transaction has timed out
 	def check_for_transaction_timeout(self):
 		clock = time.time()
 		for k in self.transaction_timeout.keys():
 			# resend appendentries rpc if we hit timeout. Reset time in our transaction_timeout dict
-			if (clock - self.last_sent_rpc) * 1000 > self.rpc_timeout_length:
+			if (clock - self.transaction_timeout[k]) * 1000 > self.rpc_timeout_length:
+				print "resent transaction msg"
 				msg = {'src': self.id, 'dst': 'FFFF', 'leader': self.leader_id, 'term': self.term, 'type': 'leader_rpc', 'key': self.transaction_log[k]['key'], 'value': self.transaction_log[k]['value'], 'blank': False, 'commit': False}
 				self.send_rpc(msg)
 				self.transaction_timeout[k] = time.time()
@@ -86,7 +87,7 @@ class Server:
 				self.check_for_transaction_timeout()
 			else:
 				self.check_for_timeout()
-			ready = select.select([self.sock], [], [], 0.05)[0]
+			ready = select.select([self.sock], [], [], 0.01)[0]
 	
 			if self.sock in ready:
 				msg_raw = self.sock.recv(32768)
@@ -119,6 +120,10 @@ class Server:
                                                                 self.sock.send(json.dumps(msg))
 						# if msg is a put, enter entry into our transaction log and send rpc appendentries to replicas
 						elif msg['type'] == 'put':
+							# if key is already in our key value store, then immediately resend ok
+							if msg['key'] in self.kv_store.keys():
+								client_msg = {'src': self.id, 'dst': self.transaction_log[msg['key']]['src'], 'leader': self.leader_id, 'type': 'ok', 'MID': self.transaction_log[msg['key']]['MID']}
+								self.sock.send(json.dumps(client_msg))
 							self.transaction_log[msg['key']] = msg
 							self.transaction_votes[msg['key']] = 1
 							self.transaction_timeout[msg['key']] = time.time()
@@ -171,6 +176,7 @@ class Server:
 					if not self.voted and self.state == 'follower':
 						# if our commit term is lower, then vote
 						if self.commit_term < msg['commit_term']:
+							print "{0} voted for {1}".format(self.id, msg['src'])
 							msg = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'vote_rpc'}
 							self.sock.send(json.dumps(msg))
 							# reset our last received rpc time
@@ -178,6 +184,7 @@ class Server:
 							self.voted = True
 						# if commit terms same, compare log index
 						elif self.commit_term == msg['commit_term'] and len(self.kv_store.keys()) <= msg['log_index']:
+							print "{0} voted for {1}".format(self.id, msg['src'])
 							msg = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'vote_rpc'}
                                                         self.sock.send(json.dumps(msg))
                                                         # reset our last received rpc time
@@ -194,6 +201,7 @@ class Server:
 						self.state = 'leader'
 						self.leader_id = self.id
 						self.election_votes = 1
+						
 
 				# leader received ack for transaction
 				elif msg['type'] == 'ack_rpc':
