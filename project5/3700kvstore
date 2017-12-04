@@ -76,6 +76,8 @@ class Server:
 
 	# send rpc to all of our replicas
 	def send_rpc(self, msg):
+		# reset our last sent rpc time
+		self.last_sent_rpc = time.time()
 		for id in self.replica_ids:
 			msg['dst'] = id
 			self.sock.send(json.dumps(msg))
