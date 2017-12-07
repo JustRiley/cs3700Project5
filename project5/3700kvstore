@@ -107,13 +107,14 @@ class Server:
                         if prev_log_index == -1:
                                msg['prev_log_term'] = self.term
                         else:
+			       print "prev log index {0} with trasaction log size {1}".format(prev_log_index, len(self.transaction_log.keys()))
                                # send term at prev log index
                                key_at_index = self.transaction_log.keys()[prev_log_index]
                                msg['prev_log_term'] = self.transaction_log[key_at_index][3]
                                # send key and value of NEXT index
-                               next_key_at_index = self.transaction_log.keys()[prev_log_index + 1]
-                               msg['key'] = self.transaction_log[next_key_at_index][0]
-                               msg['value'] = self.transaction_log[next_key_at_index][1]
+                               #next_key_at_index = self.transaction_log.keys()[prev_log_index + 1]
+                               #msg['key'] = self.transaction_log[next_key_at_index][0]
+                               #msg['value'] = self.transaction_log[next_key_at_index][1]
                         msg['dst'] = id
                         self.sock.send(json.dumps(msg))
 
@@ -132,15 +133,16 @@ class Server:
                         	if prev_log_index == -1:
                                 	msg['prev_log_term'] = self.term
                         	else:
-                               		# send term at prev log index
+			       		print "prev log index {0} with trasaction log size {1}".format(prev_log_index, len(self.transaction_log.keys()))
+					# send term at prev log index
                                		key_at_index = self.transaction_log.keys()[prev_log_index]
                                		msg['prev_log_term'] = self.transaction_log[key_at_index][3]
                                		# send key and value of NEXT index
                                		next_key_at_index = self.transaction_log.keys()[prev_log_index + 1]
                                		msg['key'] = self.transaction_log[next_key_at_index][0]
                                		msg['value'] = self.transaction_log[next_key_at_index][1]
-                        msg['dst'] = id
-                        self.sock.send(json.dumps(msg))
+                        	msg['dst'] = id
+                        	self.sock.send(json.dumps(msg))
 
 	# commit all transactions up to index
 	def append_commits(self, commit_index):
@@ -228,13 +230,16 @@ class Server:
 						print "{0} reverted back to follower from leader and set leader_id to {1}".format(self.id, self.leader_id)
 					# if we receive appendentries rpc, add to our transaction log and send confirmation to leader
 					if self.state == 'follower' and not msg['blank']:
+						print "received appendentries msg {0}".format(msg)
 						# reply false if leader term is less than our term
 						if msg['term'] < self.term:
 							print "sent fail message 1"
 							response =  {'src': self.id, 'dst': self.leader_id, 'term': self.term, 'leader': self.leader_id, 'type': 'ack_rpc', 'key': msg['key'], 'value': msg['value'], 'MID': msg['MID'], 'success': False}
 							self.sock.send(json.dumps(response))
 						# accept blindly if our transaction log is empty
-						elif len(self.transaction_log.keys()) == 0:
+						#elif len(self.transaction_log.keys()) == 0:
+						# trying different initial check
+						elif self.current_log_index == -1:
 							print "hit initial block {0}".format(msg)
 							response =  {'src': self.id, 'dst': self.leader_id, 'term': self.term, 'leader': self.leader_id, 'type': 'ack_rpc', 'key': msg['key'], 'value': msg['value'], 'MID': msg['MID'], 'success': True}
                                                         self.transaction_log[msg['MID']] = [msg['key'], msg['value'], msg['recipient'], self.term]
@@ -254,7 +259,9 @@ class Server:
 							if self.transaction_log[key_at_index][3] != msg['prev_log_term']:
 								print "sent fail message 3"
 								self.current_log_index -= 1
-								self.current_log_term = self.transaction_log[self.current_log_index][3]
+								# only change current log term if our log index isnt at beginning
+								if self.current_log_index > -1:
+									self.current_log_term = self.transaction_log[self.current_log_index][3]
 								del self.transaction_log[msg['MID']]
 								response =  {'src': self.id, 'dst': self.leader_id, 'term': self.term, 'leader': self.leader_id, 'type': 'ack_rpc', 'key': msg['key'], 'value': msg['value'], 'MID': msg['MID'], 'success': False}
                                                         else:
