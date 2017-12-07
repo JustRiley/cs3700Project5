@@ -204,11 +204,6 @@ class Server:
 							self.current_log_index += 1
 							self.current_log_term = self.term
 							#print "sent put leader rpc"
-					# if we are a candidate, send a fail for the client put or get request
-					elif self.state == 'candidate':
-						#print "candidate {0} sent a fail".format(self.id)
-						response = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'fail', 'MID': msg['MID']}
-						self.sock.send(json.dumps(response))
 
 				# Handle noop messages. This may be removed from your final implementation
 				elif msg['type'] == 'leader_rpc':
