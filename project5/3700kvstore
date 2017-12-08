@@ -259,7 +259,7 @@ class Server:
 
 				# Handle noop messages. This may be removed from your final implementation
 				elif msg['type'] == 'leader_rpc':
-					print "{0} received a leader_rpc {1}".format(self.id, msg)
+					#print "{0} received a leader_rpc {1}".format(self.id, msg)
 					# reset our last received rpc time
 					self.last_received_rpc = time.time()
 					# revert to follower if we are candidate and we receive a leader rpc (leader comes back up)
@@ -346,7 +346,7 @@ class Server:
 
 				# received a request for a vote rpc
 				elif msg['type'] == 'requestvote_rpc':
-					print "{0} received a vote request".format(self.id)
+					print "{0} received a vote request state: {1}".format(self.id, self.state)
 					if self.state == 'follower':
 					# make sure we are a follower and we haven't yet voted in this term
 						if msg['term'] not in self.voted_for.keys():
@@ -372,7 +372,7 @@ class Server:
 						if msg['term'] > self.term:
 							# revert to follower and update term
 							print "{0} Leader reverting to follower {1} b/c request vote term higher than own".format(self.id, msg['src'])
-							self.state = 'follower'
+							#self.state = 'follower'
 							self.term = msg['term']
 						# reset the active replicas
 						if self.active_replica_ids[msg['src']] >= 10:
