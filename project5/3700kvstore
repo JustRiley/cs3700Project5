@@ -41,6 +41,7 @@ class Server:
 	current_log_term = 1
 	# map of replica id to nextindex for that replica
 	next_index_map = {}
+	buffered_packets = []
 	
 	sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         sock.connect(id)
@@ -153,7 +154,31 @@ class Server:
 				key_at_index = self.transaction_log.keys()[self.commit_index]
 				# append entry to our kv_store
 				self.kv_store[self.transaction_log[key_at_index][0]] = self.transaction_log[key_at_index][1]
-	
+
+	# send redirect response to client for buffered packets
+	def redirect_buffered_packets(self):
+		for packet in self.buffered_packets:
+			packet['leader'] = self.leader_id
+			self.sock.send(json.dumps(packet))
+
+	# process buffered packets if we became leader
+	def process_buffered_packets(self):
+		for packet in self.buffered_packets:
+			if packet['type'] == 'get':
+				# if requested key is in our key value store, return the value
+                                if msg['key'] in self.kv_store.keys():
+                                	msg = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'type': 'ok', 'MID': msg['MID'], 'value': self.kv_store[msg['key']]}
+                                        self.sock.send(json.dumps(msg))
+                                # send blank message if key ws never put in our key value store
+                                else:
+                   	        	msg = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'type': 'ok', 'MID': msg['MID'], 'value': ''}
+                                	self.sock.send(json.dumps(msg))
+			elif pack['type'] == 'put':
+				response = {'src': self.id, 'dst': 'FFFF', 'leader': self.leader_id, 'term': self.term, 'type': 'leader_rpc', 'key': packet['key'],
+						'value': packet['value'], 'blank': False, 'prev_log_index': self.current_log_index, 'prev_log_term': self.current_log_term,
+				 		'leader_commit': self.commit_index, 'MID': packet['MID'], 'recipient': packet['recipient']}
+				self.sock.send(json.dumps(response))
+
 	def receive(self):
 		while True:
 			if self.state == 'leader':
@@ -196,7 +221,9 @@ class Server:
 						# if msg is a put, enter entry into our transaction log and send rpc appendentries to replicas
 						elif msg['type'] == 'put':
 							#print "leader received a put {0}".format(msg)
-							response = {'src': self.id, 'dst': 'FFFF', 'leader': self.leader_id, 'term': self.term, 'type': 'leader_rpc', 'key': msg['key'], 'value': msg['value'], 'blank': False, 'prev_log_index': self.current_log_index, 'prev_log_term': self.current_log_term, 'leader_commit': self.commit_index, 'MID': msg['MID'], 'recipient': msg['src']}
+							response = {'src': self.id, 'dst': 'FFFF', 'leader': self.leader_id, 'term': self.term, 'type': 'leader_rpc', 
+									'key': msg['key'], 'value': msg['value'], 'blank': False, 'prev_log_index': self.current_log_index, 
+									'prev_log_term': self.current_log_term, 'leader_commit': self.commit_index, 'MID': msg['MID'], 'recipient': msg['src']}
 							self.transaction_log[msg['MID']] = [msg['key'], msg['value'], msg['src'], self.term]
 							self.transaction_votes[msg['MID']] = [self.id]
 							self.transaction_timeout[msg['MID']] = time.time()
@@ -204,11 +231,16 @@ class Server:
 							self.current_log_index += 1
 							self.current_log_term = self.term
 							#print "sent put leader rpc"
-					# if we are a candidate, send a fail for the client put or get request
+					# if we are a candidate, buffer packet
 					elif self.state == 'candidate':
 						#print "candidate {0} sent a fail".format(self.id)
-						response = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'fail', 'MID': msg['MID']}
-						self.sock.send(json.dumps(response))
+						if msg['type'] == 'get':
+							response = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'redirect', 'MID': msg['MID'], 'key': msg['key']}
+							self.buffered_packets.append(response)
+						elif msg['type'] == 'put':
+							response = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'redirect', 'MID': msg['MID'], 'key': msg['key'],
+									'value': msg['value'], 'recipient': msg['src']}
+							self.buffered_packets.append(response)
 
 				# Handle noop messages. This may be removed from your final implementation
 				elif msg['type'] == 'leader_rpc':
@@ -222,6 +254,10 @@ class Server:
                                                 self.election_votes = 1
 						self.leader_id = msg['leader']
 						self.term = msg['term']
+						# send redirect to new leader for our buffered packets
+						self.redirect_buffered_packets()
+						# clear our buffered packets
+						self.buffered_packets = []
                                                 print "{0} candidate reverted to follower and set leader_id to {1}".format(self.id, self.leader_id)
 					elif self.state == 'follower' and self.leader_id != msg['leader'] and self.term <= msg['term']:
 						self.leader_id = msg['leader']
@@ -311,6 +347,7 @@ class Server:
                                                         self.last_received_rpc = time.time()
                                                         self.voted_for[msg['term']] = msg['src']
 							self.leader_id = None
+
 				# received a vote rpc
 				elif msg['type'] == 'vote_rpc' and self.state == 'candidate':
 					print "{0} received a vote".format(self.id)
@@ -321,8 +358,12 @@ class Server:
 						self.state = 'leader'
 						self.leader_id = self.id
 						self.election_votes = 1
+						# initialize our replicas' prev_log_index
 						self.set_replica_indexes()
-						
+						# process our buffered packets
+						self.process_buffered_packets()
+						# clear out buffered packets
+						self.buffered_packets = []
 
 				# leader received ack for transaction
 				elif msg['type'] == 'ack_rpc':
