@@ -38,13 +38,15 @@ class Server:
 	# current log index
 	current_log_index = -1
 	# current log term
-	current_log_term = 1
+	current_log_term = 0
 	# map of replica id to nextindex for that replica
 	next_index_map = {}
 	buffered_packets = []
 	# for debugging purposes
 	message_count = 0
 	active_replica_ids = {}
+	# requests already processed, map MID to response message
+	processed_requests = {}
 	
 	sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         sock.connect(id)
@@ -217,19 +219,24 @@ class Server:
                                                         self.sock.send(json.dumps(msg))
 					# If i am a leader, commit transaction and send rpc to followers
 					elif self.state == 'leader':
+						# check if we have already processed this message
+						if msg['MID'] in self.processed_requests.keys():
+							self.sock.send(json.dumps(self.processed_requests[msg['MID']]))
 						# If msg is a get, return value to client
-						if msg['type'] == 'get':
+						elif msg['type'] == 'get':
 							#print "leader received a get {0}".format(msg)
 							# if requested key is in our key value store, return the value
 							if msg['key'] in self.kv_store.keys():
-								msg = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'type': 'ok', 'MID': msg['MID'], 'value': self.kv_store[msg['key']]}
+								response = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'type': 'ok', 'MID': msg['MID'], 'value': self.kv_store[msg['key']]}
 								#self.message_count += 1
 								#print "leader send get to client {0}".format(self.message_count)
-								self.sock.send(json.dumps(msg))
+								self.sock.send(json.dumps(response))
 							# send blank message if key ws never put in our key value store
 							else:
-								msg = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'type': 'ok', 'MID': msg['MID'], 'value': ''}
-                                                                self.sock.send(json.dumps(msg))
+								response = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'type': 'ok', 'MID': msg['MID'], 'value': ''}
+                                                                self.sock.send(json.dumps(response))
+							# add this request to processed_requests
+							self.processed_requests[msg['MID']] = response
 						# if msg is a put, enter entry into our transaction log and send rpc appendentries to replicas
 						elif msg['type'] == 'put':
 							#print "leader received a put {0}".format(msg)
@@ -264,7 +271,7 @@ class Server:
 					self.last_received_rpc = time.time()
 					# revert to follower if we are candidate and we receive a leader rpc (leader comes back up)
                                         # make sure leader rpc we receive is at least our term
-                                        if self.state == 'candidate' and msg['term'] >= self.term:
+                                        if self.state == 'candidate':
                                                 self.state = 'follower'
                                                 self.election_votes = 1
 						self.leader_id = msg['leader']
@@ -273,7 +280,10 @@ class Server:
 						self.redirect_buffered_packets()
 						# clear our buffered packets
 						self.buffered_packets = []
-                                                print "{0} candidate reverted to follower and set leader_id to {1}".format(self.id, self.leader_id)
+						# send requestvote to leader to make it aware of our presence
+						#response = {'src': self.id, 'dst': self.leader_id, 'term': self.term, 'log_term': self.current_log_term, 'log_index': self.current_log_index, 'leader': self.leader_id, 'type': 'requestvote_rpc'}
+                                                #self.sock.send(json.dumps(response))
+						print "{0} candidate reverted to follower and set leader_id to {1}".format(self.id, self.leader_id)
 					elif self.state == 'follower' and self.leader_id != msg['leader'] and self.term <= msg['term']:
 						self.leader_id = msg['leader']
 						self.term = msg['term']
@@ -294,7 +304,7 @@ class Server:
 						# accept blindly if our transaction log is empty
 						#elif len(self.transaction_log.keys()) == 0:
 						# trying different initial check
-						elif self.current_log_index == -1:
+						elif msg['prev_log_index']  == -1:
 							#print "hit initial block {0}".format(msg)
 							response =  {'src': self.id, 'dst': self.leader_id, 'term': self.term, 'leader': self.leader_id, 'type': 'ack_rpc', 'key': msg['key'], 'value': msg['value'], 'MID': msg['MID'], 'success': True}
                                                         self.transaction_log[msg['MID']] = [msg['key'], msg['value'], msg['recipient'], self.term]
@@ -369,12 +379,12 @@ class Server:
                                                         	self.voted_for[msg['term']] = msg['src']
 								self.leader_id = None
 					elif self.state == 'leader':
-						if msg['term'] > self.term:
+					#	if msg['term'] > self.term:
 							# revert to follower and update term
-							print "{0} Leader reverting to follower {1} b/c request vote term higher than own".format(self.id, msg['src'])
+							#print "{0} Leader reverting to follower {1} b/c request vote term higher than own".format(self.id, msg['src'])
 							#self.state = 'follower'
-							self.term = msg['term']
-						# reset the active replicas
+					#		self.term = msg['term']
+					#	# reset the active replicas
 						if self.active_replica_ids[msg['src']] >= 10:
 							for id in self.active_replica_ids.keys():
 								self.active_replica_ids[id] = 0
@@ -399,6 +409,10 @@ class Server:
 						# reset our transaction timeout and votes
 						self.transaction_timeout = {}
 						self.transaction_votes = {}
+						# immediately send empty rpc message
+						msg = {'src': self.id, 'dst': 'FFFF', 'leader': self.id, 'type': 'leader_rpc', 'term': self.term, 'blank': True}
+						self.send_rpc(msg)
+						self.last_sent_rpc = time.time()
 
 				# leader received ack for transaction
 				elif msg['type'] == 'ack_rpc':
@@ -425,6 +439,8 @@ class Server:
 								self.append_commits(new_commit_index)
 								# send ok to client
 								client_msg = {'src': self.id, 'dst': self.transaction_log[msg['MID']][2], 'leader': self.leader_id, 'type': 'ok', 'MID': msg['MID']}
+								# add MID to our processed_requests
+								self.processed_requests[msg['MID']] = client_msg
 								self.sock.send(json.dumps(client_msg))
 					# if we got a fail from replica
 					else:
