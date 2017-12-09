@@ -14,7 +14,7 @@ class Server:
 	leader_id = None
 	last_received_rpc = time.time()
 	# timeout length for this server (between 150 and 300 ms)
-	timeout_length = randint(350, 500)
+	timeout_length = randint(150, 300)
 	# who we voted for, map of term to who we voted for
 	voted_for = {}
 	# number of votes we received
@@ -127,15 +127,19 @@ class Server:
 				self.processed_requests[key_at_index] = client_msg
 				# append entry to our kv_store
 				self.kv_store[self.transaction_log[key_at_index][0]] = self.transaction_log[key_at_index][1]
+				# send ok to client
+				self.sock.send(json.dumps(client_msg))
 
 	# send redirect response to client for buffered packets
 	def redirect_buffered_packets(self):
+		print "{0} redirected {1} buffered packets".format(self.id, len(self.buffered_packets))
 		for packet in self.buffered_packets:
 			packet['leader'] = self.leader_id
 			self.sock.send(json.dumps(packet))
 
 	# process buffered packets if we became leader
 	def process_buffered_packets(self):
+		print "{0} processed {1} buffered packets".format(self.id, len(self.buffered_packets))
 		for packet in self.buffered_packets:
 			if packet['type'] == 'get':
 				# if requested key is in our key value store, return the value
@@ -206,8 +210,7 @@ class Server:
 							# if requested key is in our key value store, return the value
 							if msg['key'] in self.kv_store.keys():
 								response = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'type': 'ok', 'MID': msg['MID'], 'value': self.kv_store[msg['key']]}
-								#self.message_count += 1
-								#print "leader send get to client {0}".format(self.message_count)
+								print "leader send response for get {1}  to client {0}".format(msg['key'], response)
 								self.sock.send(json.dumps(response))
 							# send blank message if key ws never put in our key value store
 							else:
@@ -442,6 +445,7 @@ class Server:
 								# send ok to client
 								client_msg = {'src': self.id, 'dst': self.transaction_log[msg['MID']][2], 'leader': self.leader_id, 'type': 'ok', 'MID': msg['MID']}
 								# add MID to our processed_requests
+								print "sent ok to client for put request key {0} value {1}".format(msg['key'], msg['value'])
 								self.processed_requests[msg['MID']] = client_msg
 								self.sock.send(json.dumps(client_msg))
 					# if we got a fail from replica
