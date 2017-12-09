@@ -5,7 +5,7 @@ from random import randint
 from collections import OrderedDict
 
 class Server:
-	term = 1
+	term = 0
 	state = 'follower'
 	# Your ID number
 	id = sys.argv[1]
@@ -79,7 +79,6 @@ class Server:
 				#print "resent transaction msg for {0}".format(id)
 				msg = {'src': self.id, 'dst': id, 'leader': self.leader_id, 'term': self.term, 'type': 'leader_rpc','blank': True, 'leader_commit': self.commit_index}
 				self.send_rpc(msg)
-				self.replica_timeout[id] = time.time()
 
 	# set all of the indexes for our replicas in our next_index_map
 	def set_replica_indexes_and_timeouts(self):
@@ -91,12 +90,14 @@ class Server:
 
 	# send append_entry rpc to the replica 
 	def send_rpc(self, msg):
+		self.replica_timeout[msg['dst']] = time.time()
                 prev_log_index = self.next_index_map[msg['dst']]
                 #print prev_log_index
                 msg['prev_log_index'] = prev_log_index
                 # take into account first message
                 if len(self.transaction_log.keys()) == 0:
 			msg['prev_log_term'] = self.term
+			msg['entry_term'] = self.term
 		# if send blank leader rpc if 
 		elif prev_log_index == len(self.transaction_log.keys()) - 1:
 			msg['blank'] = True
@@ -109,6 +110,7 @@ class Server:
                         msg['key'] = self.transaction_log[next_key_at_index][0]
                         msg['value'] = self.transaction_log[next_key_at_index][1]
 			msg['recipient'] = self.transaction_log[next_key_at_index][2]
+			msg['entry_term'] = self.transaction_log[next_key_at_index][3]
 			msg['MID'] = next_key_at_index	
 			msg['blank'] = False 
                 self.sock.send(json.dumps(msg))
@@ -120,6 +122,9 @@ class Server:
 			while self.commit_index < commit_index:
 				self.commit_index += 1
 				key_at_index = self.transaction_log.keys()[self.commit_index]
+				# append mid to our processed requests
+				client_msg = {'src': self.id, 'dst': self.transaction_log[key_at_index][2], 'leader': self.leader_id, 'type': 'ok', 'MID': key_at_index}
+				self.processed_requests[key_at_index] = client_msg
 				# append entry to our kv_store
 				self.kv_store[self.transaction_log[key_at_index][0]] = self.transaction_log[key_at_index][1]
 
@@ -202,6 +207,7 @@ class Server:
 							self.transaction_votes[msg['MID']] = [self.id]
 							self.current_log_index += 1
 							self.current_log_term = self.term
+
 					# if we are a candidate, buffer packet
 					elif self.state == 'candidate':
 						#print "candidate {0} sent a fail".format(self.id)
@@ -218,6 +224,9 @@ class Server:
 					#print "{0} received a leader_rpc {1}".format(self.id, msg)
 					if self.state == 'follower':
 						self.last_received_rpc = time.time()
+					# update our term if received term is higher
+					if msg['term'] > self.term:
+						self.term = msg['term']
 					# revert to follower if we are candidate and we receive a leader rpc (leader comes back up)
                                         # make sure leader rpc we receive is at least our term
                                         if self.state == 'candidate':
@@ -237,7 +246,7 @@ class Server:
 					elif self.state == 'follower' and self.leader_id != msg['leader'] and self.term <= msg['term']:
 						self.leader_id = msg['leader']
 						self.term = msg['term']
-						print "{0} set leader_id to {1}".format(self.id, self.leader_id)
+						print "{0} set leader_id to {1} and term to {2}".format(self.id, self.leader_id, self.term)
 					# set term to leader's term if ours is lower
 					elif self.state == 'leader' and self.term < msg['term']:
 						self.term = msg['term']
@@ -257,7 +266,7 @@ class Server:
 						elif msg['prev_log_index']  == -1:
 							#print "hit initial block {0}".format(msg)
 							response =  {'src': self.id, 'dst': self.leader_id, 'term': self.term, 'leader': self.leader_id, 'type': 'ack_rpc', 'key': msg['key'], 'value': msg['value'], 'MID': msg['MID'], 'success': True}
-                                                        self.transaction_log[msg['MID']] = [msg['key'], msg['value'], msg['recipient'], msg['term']]
+                                                        self.transaction_log[msg['MID']] = [msg['key'], msg['value'], msg['recipient'], msg['entry_term']]
                                                         self.current_log_index = msg['prev_log_index'] + 1
                                                         self.current_log_term = self.term
 							self.sock.send(json.dumps(response))
@@ -272,7 +281,7 @@ class Server:
 							#	response =  {'src': self.id, 'dst': self.leader_id, 'term': self.term, 'leader': self.leader_id, 'type': 'ack_rpc', 'key': msg['key'], 'value': msg['value'], 'MID': msg['MID'], 'success': False}
 							key_at_index = self.transaction_log.keys()[msg['prev_log_index']]
 							if self.transaction_log[key_at_index][3] != msg['prev_log_term']:
-								print "{0} hit different prev log term".format(self.id)
+								#print "{0} hit different prev log term for index {1} our term {2} vs their term {3}".format(self.id, msg['prev_log_index'],self.transaction_log[key_at_index][3], msg['prev_log_term'])
 								self.current_log_index = msg['prev_log_index'] - 1
 								# only change current log term if our log index isnt at beginning
 								if self.current_log_index > -1:
@@ -284,9 +293,9 @@ class Server:
                                                         
 							else:
 								
-								#print "sent success for {0}".format(msg['prev_log_index'])
+								#print "{0} sent success for {1} with term {2}".format(self.id, msg['prev_log_index'], msg['term'])
 								response =  {'src': self.id, 'dst': self.leader_id, 'term': self.term, 'leader': self.leader_id, 'type': 'ack_rpc', 'key': msg['key'], 'value': msg['value'], 'MID': msg['MID'], 'success': True}
-								self.transaction_log[msg['MID']] = [msg['key'], msg['value'], msg['recipient'], msg['term']]
+								self.transaction_log[msg['MID']] = [msg['key'], msg['value'], msg['recipient'], msg['entry_term']]
 								#print "after insert, transaction log length is now {0}".format(len(self.transaction_log.keys()))
 								self.current_log_index = msg['prev_log_index'] + 1
 								self.current_log_term = self.term
@@ -298,7 +307,7 @@ class Server:
 							self.sock.send(json.dumps(response))
 						else:
 							#print "sent fail message 5 msg: {0}".format(msg)
-							print "{0} prev log index at {1} with our transaction log -1 at {2}".format(self.id, msg['prev_log_index'], len(self.transaction_log.keys()) - 1) 
+							#print "{0} prev log index at {1} with our transaction log -1 at {2}".format(self.id, msg['prev_log_index'], len(self.transaction_log.keys()) - 1) 
 							response =  {'src': self.id, 'dst': self.leader_id, 'term': self.term, 'leader': self.leader_id, 'type': 'ack_rpc', 'key': msg['key'], 'value': msg['value'], 'MID': msg['MID'], 'success': False}
 							#self.message_count += 1
 							#print"send ack to leader total: {0}".format(self.message_count)
@@ -354,7 +363,7 @@ class Server:
 						# reset our transaction timeout and votes
 						self.transaction_votes = {}
 						# immediately send empty rpc message
-						msg = {'src': self.id, 'dst': 'FFFF', 'leader': self.id, 'type': 'leader_rpc', 'term': self.term, 'blank': True}
+						msg = {'src': self.id, 'dst': 'FFFF', 'leader': self.leader_id, 'term': self.term, 'type': 'leader_rpc','blank': True, 'leader_commit': self.commit_index}
 						for id in self.replica_ids:
 							msg['dst'] = id
 							self.sock.send(json.dumps(msg))
@@ -368,9 +377,6 @@ class Server:
 					if msg['success']:
 						#print "received a success for {0}".format(msg['MID'])
 						self.next_index_map[msg['src']] += 1
-						# send next packet after a success
-						response = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'term': self.term, 'type': 'leader_rpc','blank': True, 'leader_commit': self.commit_index}
-						self.send_rpc(response)
 						if msg['MID'] in self.transaction_votes.keys():
 							# increment number of votes for this key
 							if msg['src']  not in self.transaction_votes[msg['MID']]:
@@ -395,9 +401,12 @@ class Server:
 					else:
 						#print "received a fail for {0}".format(msg['MID'])
 						if self.term < msg['term']:
-							self.term == msg['term']
+							self.term = msg['term']
 						# decrement our next index
 						self.next_index_map[msg['src']] -= 1
+					# send next packet
+                                        response = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'term': self.term, 'type': 'leader_rpc','blank': True, 'leader_commit': self.commit_index}
+                                        self.send_rpc(response)
 if __name__ == '__main__':
 	server = Server()
 	server.receive()
