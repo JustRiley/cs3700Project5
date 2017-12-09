@@ -133,6 +133,8 @@ class Server:
 		for packet in self.buffered_packets:
 			packet['leader'] = self.leader_id
 			self.sock.send(json.dumps(packet))
+			self.message_count += 1
+			print "{0} has redirected {1} buffered packets".format(self.id, self.message_count)
 
 	# process buffered packets if we became leader
 	def process_buffered_packets(self):
@@ -174,9 +176,22 @@ class Server:
 						if self.leader_id:
 							msg = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'type': 'redirect', 'MID': msg['MID']}
 							self.sock.send(json.dumps(msg))
-						else:
+							self.message_count += 1
+							print "{0} has redirected {1} redirect packets to leader {2}".format(self.id, self.message_count, self.leader_id)
+						# initial term, send redirect with leader as multicast
+						elif self.term == 0:
 							msg = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'redirect', 'MID': msg['MID']}
                                                         self.sock.send(json.dumps(msg))
+						# in election, add to buffered packets
+						else:
+                                                	if msg['type'] == 'get':
+                                                        	response = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'redirect', 'MID': msg['MID'], 'key': msg['key']}
+                                                        	self.buffered_packets.append(response)
+                                                	elif msg['type'] == 'put':
+                                                        	response = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'redirect', 'MID': msg['MID'], 'key': msg['key'],
+                                                                        'value': msg['value'], 'recipient': msg['src']}
+                                                        	self.buffered_packets.append(response)
+
 					# If i am a leader, commit transaction and send rpc to followers
 					elif self.state == 'leader':
 						# check if we have already processed this message
@@ -221,12 +236,9 @@ class Server:
 
 				# Handle noop messages. This may be removed from your final implementation
 				elif msg['type'] == 'leader_rpc':
-					#print "{0} received a leader_rpc {1}".format(self.id, msg)
+					print "{0} received a leader_rpc {1}".format(self.id, msg)
 					if self.state == 'follower':
 						self.last_received_rpc = time.time()
-					# update our term if received term is higher
-					if msg['term'] > self.term:
-						self.term = msg['term']
 					# revert to follower if we are candidate and we receive a leader rpc (leader comes back up)
                                         # make sure leader rpc we receive is at least our term
                                         if self.state == 'candidate':
@@ -246,6 +258,10 @@ class Server:
 					elif self.state == 'follower' and self.leader_id != msg['leader'] and self.term <= msg['term']:
 						self.leader_id = msg['leader']
 						self.term = msg['term']
+						# redirect our buffered packets
+						self.redirect_buffered_packets()
+						# clear our buffered packets
+						self.buffered_packets = []
 						print "{0} set leader_id to {1} and term to {2}".format(self.id, self.leader_id, self.term)
 					# set term to leader's term if ours is lower
 					elif self.state == 'leader' and self.term < msg['term']:
