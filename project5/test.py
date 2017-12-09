@@ -110,12 +110,12 @@ trials.append(run_test('partition-4.json', 'No drops, 2 hard partitions, 20% rea
 ldr = open(LEADERBOARD_OUTPUT + getpass.getuser(), 'w')
 
 print 'Bring the pain (5 replicas, 30 seconds):'
-#trials.append(run_test('advanced-1.json', '1000 requests, 10% drops, 2 hard partitions and 1 leader failures, 20% read',
-#                       PACKETS_HIGH, REPLICAS, MAYFAIL_HIGH, 1.5, LATENCY_HIGH, ldr))
-#trials.append(run_test('advanced-2.json', '800 requests, 15% drops, 2 leader failures, 20% read',
-#                       PACKETS_MID, REPLICAS, MAYFAIL_HIGH, 1.5, LATENCY_MID, ldr))
-#trials.append(run_test('advanced-3.json', '500 requests, 50% drops, 1 leader failure, 20% read',
-#                       PACKETS_LOW, REPLICAS, 0.3, 2, LATENCY_HIGH, ldr))
+trials.append(run_test('advanced-1.json', '1000 requests, 10% drops, 2 hard partitions and 1 leader failures, 20% read',
+                       PACKETS_HIGH, REPLICAS, MAYFAIL_HIGH, 1.5, LATENCY_HIGH, ldr))
+trials.append(run_test('advanced-2.json', '800 requests, 15% drops, 2 leader failures, 20% read',
+                       PACKETS_MID, REPLICAS, MAYFAIL_HIGH, 1.5, LATENCY_MID, ldr))
+trials.append(run_test('advanced-3.json', '500 requests, 50% drops, 1 leader failure, 20% read',
+                       PACKETS_LOW, REPLICAS, 0.3, 2, LATENCY_HIGH, ldr))
 
 #print 'Bonus Mode Extra Credit! (5 replicas, 30 seconds, 1000 requests):'
 #trials.append(run_test('advanced-4.json', '10% drops, 3 hard partions and 1 leader kill, 20% read',
