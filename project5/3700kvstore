@@ -22,7 +22,7 @@ class Server:
 	# as leader, last time we sent an rpc time
 	last_sent_rpc = time.time()
 	# timeout length as leader
-	rpc_timeout_length = 100
+	rpc_timeout_length = 75
 	# our transaction log mapping MID to array [key, value, dst, term]
 	transaction_log = OrderedDict()
 	# our key value store of committed transactions
@@ -99,7 +99,7 @@ class Server:
 			msg['prev_log_term'] = self.term
 			msg['entry_term'] = self.term
 		# if send blank leader rpc if 
-		elif prev_log_index == len(self.transaction_log.keys()) - 1:
+		elif prev_log_index >= len(self.transaction_log.keys()) - 1:
 			msg['blank'] = True
                 else:
 			#print "prev log index {0} with trasaction log size {1}".format(prev_log_index, len(self.transaction_log.keys()))
@@ -232,12 +232,12 @@ class Server:
 
 				# Handle noop messages. This may be removed from your final implementation
 				elif msg['type'] == 'leader_rpc':
-					#print "{0} received a leader_rpc {1}".format(self.id, msg)
+					print "{0} received a leader_rpc {1}".format(self.id, msg)
 					if self.state == 'follower':
 						self.last_received_rpc = time.time()
 					# revert to follower if we are candidate and we receive a leader rpc (leader comes back up)
                                         # make sure leader rpc we receive is at least our term
-                                        if self.state == 'candidate':
+                                        if self.state == 'candidate' and self.term <= msg['term']:
 						self.last_received_rpc = time.time()
                                                 self.state = 'follower'
                                                 self.election_votes = 1
@@ -276,11 +276,11 @@ class Server:
 						#elif len(self.transaction_log.keys()) == 0:
 						# trying different initial check
 						elif msg['prev_log_index']  == -1:
-							#print "hit initial block {0}".format(msg)
+							print "hit initial block {0}".format(self.id)
 							response =  {'src': self.id, 'dst': self.leader_id, 'term': self.term, 'leader': self.leader_id, 'type': 'ack_rpc', 'key': msg['key'], 'value': msg['value'], 'MID': msg['MID'], 'success': True}
                                                         self.transaction_log[msg['MID']] = [msg['key'], msg['value'], msg['recipient'], msg['entry_term']]
                                                         self.current_log_index = msg['prev_log_index'] + 1
-                                                        self.current_log_term = self.term
+                                                        self.current_log_term = msg['entry_term']
 							self.sock.send(json.dumps(response))
 							new_commit_index = min(msg['leader_commit'], msg['prev_log_index'])
                                                 	self.append_commits(new_commit_index)	
@@ -310,7 +310,7 @@ class Server:
 								self.transaction_log[msg['MID']] = [msg['key'], msg['value'], msg['recipient'], msg['entry_term']]
 								#print "after insert, transaction log length is now {0}".format(len(self.transaction_log.keys()))
 								self.current_log_index = msg['prev_log_index'] + 1
-								self.current_log_term = self.term
+								self.current_log_term = msg['entry_term']
 								new_commit_index = min(msg['leader_commit'], msg['prev_log_index'])
                                                 		self.append_commits(new_commit_index)
 
@@ -328,6 +328,9 @@ class Server:
 
 				# received a request for a vote rpc
 				elif msg['type'] == 'requestvote_rpc':
+					if self.term < msg['term']:
+						self.term = msg['term']
+						self.state = 'follower'
 					print "{0} received a vote request state: {1}".format(self.id, self.state)
 					if self.state == 'follower':
 					# make sure we are a follower and we haven't yet voted in this term
@@ -338,7 +341,7 @@ class Server:
 								response = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'vote_rpc'}
 								self.sock.send(json.dumps(response))
 								# reset our last received rpc time
-								self.last_received_rpc = time.time()
+								#self.last_received_rpc = time.time()
 								self.voted_for[msg['term']]  = msg['src']
 								self.leader_id = None
 							# if commit terms same, compare log index
@@ -347,7 +350,7 @@ class Server:
 								response = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'vote_rpc'}
                                                         	self.sock.send(json.dumps(response))
                                                         	# reset our last received rpc time
-                                                        	self.last_received_rpc = time.time()
+                                                        	#self.last_received_rpc = time.time()
                                                         	self.voted_for[msg['term']] = msg['src']
 								self.leader_id = None
 					elif self.state == 'leader':
@@ -356,13 +359,38 @@ class Server:
 							for id in self.active_replica_ids.keys():
 								self.active_replica_ids[id] = 0
 
+					# switch our vote if their log is more up to date than ours
+					elif self.state == 'candidate':
+						# if our commit term is lower, then vote
+                                                if self.current_log_term < msg['log_term']:
+                                                	print "{0} candidate voted for {1}".format(self.id, msg['src'])
+                                                        self.state = 'follower'
+							self.election_votes = 1
+							response = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'vote_rpc'}
+                                                        self.sock.send(json.dumps(response))
+                                                        # reset our last received rpc time
+                                                        self.last_received_rpc = time.time()
+                                                        self.voted_for[msg['term']]  = msg['src']
+                                                        self.leader_id = None
+                                                # if commit terms same, compare log index
+                                                elif self.current_log_term == msg['log_term'] and self.current_log_index <= msg['log_index']:
+                                                        print "{0} candidate voted for {1}".format(self.id, msg['src'])
+                                                        self.state = 'follower'
+							self.election_votes = 1
+							response = {'src': self.id, 'dst': msg['src'], 'leader': 'FFFF', 'type': 'vote_rpc'}
+                                                        self.sock.send(json.dumps(response))
+                                                        # reset our last received rpc time
+                                                        self.last_received_rpc = time.time()
+                                                        self.voted_for[msg['term']] = msg['src']
+                                                        self.leader_id = None
+	
 				# received a vote rpc
 				elif msg['type'] == 'vote_rpc' and self.state == 'candidate':
 					print "{0} received a vote".format(self.id)
 					self.election_votes += 1
 					# become leader if we receive majority of votes
 					if self.election_votes >= len(self.replica_ids) // 2 + 1:
-						print "{0} became leader".format(self.id)
+						print "{0} became leader with log index a {1}".format(self.id, len(self.transaction_log.keys()) - 1)
 						self.state = 'leader'
 						self.leader_id = self.id
 						self.election_votes = 1
@@ -383,11 +411,9 @@ class Server:
 
 				# leader received ack for transaction
 				elif msg['type'] == 'ack_rpc':
-					# reset our timeout for this replica
-					self.replica_timeout[msg['src']] = time.time()
 					self.active_replica_ids[msg['src']] = 0
 					if msg['success']:
-						#print "received a success for {0}".format(msg['MID'])
+						print "received a success for {0} by {1}".format(msg['MID'], msg['src'])
 						self.next_index_map[msg['src']] += 1
 						if msg['MID'] in self.transaction_votes.keys():
 							# increment number of votes for this key
@@ -411,9 +437,10 @@ class Server:
 								self.sock.send(json.dumps(client_msg))
 					# if we got a fail from replica
 					else:
-						#print "received a fail for {0}".format(msg['MID'])
+						print "received a fail for {0} by {1}".format(msg['MID'], msg['src'])
 						if self.term < msg['term']:
 							self.term = msg['term']
+							self.state = 'follower'
 						# decrement our next index
 						self.next_index_map[msg['src']] -= 1
 					# send next packet
