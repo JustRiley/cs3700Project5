@@ -14,7 +14,7 @@ class Server:
 	leader_id = None
 	last_received_rpc = time.time()
 	# timeout length for this server (between 150 and 300 ms)
-	timeout_length = randint(150, 300)
+	timeout_length = randint(350, 500)
 	# who we voted for, map of term to who we voted for
 	voted_for = {}
 	# number of votes we received
@@ -300,7 +300,8 @@ class Server:
 									self.current_log_term = self.transaction_log.keys()[self.current_log_index][3]
 								# delete all entries after index
 								delete_index = self.transaction_log.keys().index(key_at_index)
-								self.transaction_log.items()[:delete_index]
+								self.transaction_log.keys()[:delete_index]
+								print "transaction log length after delete {0}".format(len(self.transaction_log.keys()) - 1)
 								response =  {'src': self.id, 'dst': self.leader_id, 'term': self.term, 'leader': self.leader_id, 'type': 'ack_rpc', 'key': msg['key'], 'value': msg['value'], 'MID': msg['MID'], 'success': False}
                                                         
 							else:
