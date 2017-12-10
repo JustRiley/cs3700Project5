@@ -210,13 +210,13 @@ class Server:
 							# if requested key is in our key value store, return the value
 							if msg['key'] in self.kv_store.keys():
 								response = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'type': 'ok', 'MID': msg['MID'], 'value': self.kv_store[msg['key']]}
-								print "leader send response for get {1}  to client {0}".format(msg['key'], response)
 								self.sock.send(json.dumps(response))
 							# send blank message if key ws never put in our key value store
 							else:
 								response = {'src': self.id, 'dst': msg['src'], 'leader': self.leader_id, 'type': 'ok', 'MID': msg['MID'], 'value': ''}
                                                                 self.sock.send(json.dumps(response))
 							# add this request to processed_requests
+							print "leader send response for get {1}  to client {0}".format(msg['key'], response)
 							self.processed_requests[msg['MID']] = response
 						# if msg is a put, enter entry into our transaction log and send rpc appendentries to replicas
 						elif msg['type'] == 'put':
@@ -271,6 +271,7 @@ class Server:
 						print "{0} set leader_id to {1} and term to {2}".format(self.id, self.leader_id, self.term)
 					# set term to leader's term if ours is lower
 					elif self.state == 'leader' and self.term < msg['term']:
+						self.last_received_rpc = time.time()
 						self.term = msg['term']
 						self.state = 'follower'
 						self.election_votes = 1
